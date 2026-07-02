@@ -19,6 +19,8 @@
  */
 #include "dfu_guide.h"
 #include "usb.h"
+#include "lockdown.h"
+#include "usbmux.h"
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -60,7 +62,15 @@ poll_present(uint16_t vid, uint16_t pid, bool want, unsigned timeout_ms) {
 }
 
 /* Wait for any Apple device to appear (normal/recovery/DFU). Returns
- * the PID that appeared, or 0 on timeout. */
+ * the PID that appeared, or 0 on timeout.
+ *
+ * Recovery/DFU are matched on their fixed PIDs. A "normal" (lockdownd-
+ * visible, pairing-capable) device is detected via usbmuxd's ListDevices,
+ * because these devices cycle through several PIDs depending on trusted
+ * vs untrusted state (0x12a8 / 0x12a9 / 0x1298 / ...) and we do not want
+ * to enumerate every variant. The returned sentinel is APPLE_VID. */
+#define APPLE_NORMAL_SENTINEL (APPLE_VID)
+
 static uint16_t
 wait_for_apple_device(unsigned timeout_ms) {
 	unsigned elapsed = 0;
@@ -71,8 +81,11 @@ wait_for_apple_device(unsigned timeout_ms) {
 		if(usb_device_present(APPLE_VID, RECOVERY_MODE_PID)) {
 			return RECOVERY_MODE_PID;
 		}
-		if(usb_device_present(APPLE_VID, NORMAL_MODE_PID)) {
-			return NORMAL_MODE_PID;
+		/* usbmuxd-visible USB device => normal mode (lockdownd reachable). */
+		uint32_t did;
+		char udid[128];
+		if(usbmux_find_first_usb_device(&did, udid, sizeof udid, NULL)) {
+			return APPLE_NORMAL_SENTINEL;
 		}
 		usleep(POLL_INTERVAL_MS * 1000);
 		elapsed += POLL_INTERVAL_MS;
@@ -80,23 +93,40 @@ wait_for_apple_device(unsigned timeout_ms) {
 	return 0;
 }
 
-/* Guide the user from normal/trusted mode into Recovery mode using only
- * the physical button sequence (no external tools, no usbmux/lockdownd).
- * Polls for the Recovery-mode PID (0x1281) to appear. */
+/* Drive a device in normal/trusted mode into Recovery mode by issuing the
+ * EnterRecovery request through usbmux -> lockdownd (no external tools).
+ * On failure, falls back to providing the manual button sequence. Polls
+ * for the Recovery-mode PID (0x1281) to appear. */
 static bool
-enter_recovery_manual(unsigned timeout_ms) {
+enter_recovery_via_lockdownd(unsigned timeout_ms) {
+	const char *err = NULL;
+	printf("Asking lockdownd to enter Recovery mode... ");
+	fflush(stdout);
+	if(lockdown_enter_recovery(&err)) {
+		print_ok("request sent.");
+		printf("Waiting for Recovery mode (PID 0x1281)... ");
+		fflush(stdout);
+		if(!poll_present(APPLE_VID, RECOVERY_MODE_PID, true, timeout_ms)) {
+			print_warn("Recovery mode did not appear within timeout.");
+			return false;
+		}
+		print_ok("Recovery mode reached.");
+		return true;
+	}
+	printf("FAILED\n");
+	if(err) printf("  %s\n", err);
+	print_warn("Automatic recovery failed (locked / not trusted / daemon down).");
+	puts("    On Linux ensure `usbmuxd` is installed and running;");
+	puts("    on macOS it ships with the system. If the device is passcode");
+	puts("    locked, unlock it and tap 'Trust This Computer' first.");
 	puts("");
-	puts("Bring the device into Recovery mode with this button sequence:");
+	puts("Falling back to the manual button sequence:");
 	puts("  1. Press and quickly release Volume Up.");
 	puts("  2. Press and quickly release Volume Down.");
 	puts("  3. Press and HOLD the Side (power) button until the screen");
-	puts("     goes completely black (ignore the 'slide to power off').");
-	puts("  4. KEEP holding Side; the screen will briefly stay black, then");
-	puts("     continue holding until the 'connect to a computer' screen");
-	puts("     (cable + iTunes/Computer icon) appears.");
-	puts("");
-	puts("(For devices with a Home button instead: press&hold Side+Home");
-	puts(" together until you see the Recovery screen.)");
+	puts("     goes black, keep holding, until the 'connect to computer'");
+	puts("     Recovery screen appears.");
+	puts("    (Home-button devices: press & hold Side+Home together.)");
 	printf("Waiting for Recovery mode... ");
 	fflush(stdout);
 	if(!poll_present(APPLE_VID, RECOVERY_MODE_PID, true, timeout_ms)) {
@@ -128,15 +158,19 @@ dfu_guide_run(void) {
 
 /* Step 1: connect device. */
 	print_step("Step 1 / 4: Connect your device via USB.");
-	if(usb_device_present(APPLE_VID, DFU_MODE_PID) ||
-	   usb_device_present(APPLE_VID, RECOVERY_MODE_PID) ||
-	   usb_device_present(APPLE_VID, NORMAL_MODE_PID)) {
-		puts("An Apple USB device is already connected; using it.");
-	} else {
-		puts("Plug it in now. If it's already plugged in, unplug it first so");
-		puts("the guide can detect a clean insertion.");
-		if(!poll_present(APPLE_VID, RECOVERY_MODE_PID, false, 10000)) {
-			print_warn("Could not confirm the device was unplugged; continuing anyway.");
+	{
+		uint32_t did; char udid[128];
+		bool already = usb_device_present(APPLE_VID, DFU_MODE_PID) ||
+		               usb_device_present(APPLE_VID, RECOVERY_MODE_PID) ||
+		               usbmux_find_first_usb_device(&did, udid, sizeof udid, NULL);
+		if(already) {
+			puts("An Apple USB device is already connected; using it.");
+		} else {
+			puts("Plug it in now. If it's already plugged in, unplug it first so");
+			puts("the guide can detect a clean insertion.");
+			if(!poll_present(APPLE_VID, RECOVERY_MODE_PID, false, 10000)) {
+				print_warn("Could not confirm the device was unplugged; continuing anyway.");
+			}
 		}
 	}
 	printf("Waiting for the device to enumerate... ");
@@ -150,10 +184,11 @@ dfu_guide_run(void) {
 		print_ok("Device is already in DFU mode!");
 		return true;
 	}
-	if(first == NORMAL_MODE_PID) {
-		print_ok("Device detected in NORMAL mode (trusted).");
-		puts("Now put it into Recovery mode with the button sequence below.");
-		if(!enter_recovery_manual(90000)) {
+	if(first == APPLE_NORMAL_SENTINEL) {
+		print_ok("Device detected in NORMAL mode (trusted/pair-capable).");
+		puts("Will enter Recovery mode automatically via usbmux/lockdownd.");
+		puts("Make sure the device is unlocked and trusted by this computer.");
+		if(!enter_recovery_via_lockdownd(60000)) {
 			return false;
 		}
 		/* fall through to the Recovery -> DFU steps below */

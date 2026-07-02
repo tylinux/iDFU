@@ -72,6 +72,19 @@ sudo apt install libusb-1.0-0-dev libssl-dev
 sudo ./idfu pwn
 ```
 
+The `guide` flow's automatic normal-mode → Recovery jump talks to the
+local `usbmuxd` daemon over `/var/run/usbmuxd`. On **macOS this ships with
+the system**; on **Linux you must install and run it yourself**:
+
+```sh
+sudo apt install usbmuxd     # also runs the daemon
+# or start manually:
+sudo usbmuxd -f
+```
+
+If no usbmuxd is running, `idfu guide` falls back to a manual button sequence.
+```
+
 ## Example: boot PongoOS
 
 ```sh
