@@ -18,6 +18,11 @@
  */
 #include "usb.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <inttypes.h>
+
 device_descriptor_t device_descriptor;
 
 unsigned usb_timeout, usb_abort_timeout_min;
@@ -130,7 +135,7 @@ send_usb_control_request_async(const usb_handle_t *handle, uint8_t bm_request_ty
 	return completed != 0;
 }
 
-static void
+void
 init_usb_handle(usb_handle_t *handle, uint16_t vid, uint16_t pid) {
 	handle->vid = vid;
 	handle->pid = pid;
