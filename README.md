@@ -125,8 +125,8 @@ iDFU/
 
 - [gaster](https://github.com/0x7ff/gaster) by 0x7ff — the checkm8 PoC and
   payload binaries this tool adapts. Licensed Apache-2.0.
-- [checkra1n](https://checkra.in) reverse-engineering notes
-  (`~/Developer/Reverse/chckra1n/REBUILD.md`) informed the DFU flow design.
+- [checkra1n](https://checkra.in) — its DFU flow design informed the
+  interactive guide and overall workflow.
 
 ## License
 
