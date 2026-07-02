@@ -59,8 +59,8 @@ poll_present(uint16_t vid, uint16_t pid, bool want, unsigned timeout_ms) {
 	return false;
 }
 
-/* Wait for either Apple Recovery or DFU to appear. Returns the PID that
- * appeared, or 0 on timeout. */
+/* Wait for any Apple device to appear (normal/recovery/DFU). Returns
+ * the PID that appeared, or 0 on timeout. */
 static uint16_t
 wait_for_apple_device(unsigned timeout_ms) {
 	unsigned elapsed = 0;
@@ -71,10 +71,40 @@ wait_for_apple_device(unsigned timeout_ms) {
 		if(usb_device_present(APPLE_VID, RECOVERY_MODE_PID)) {
 			return RECOVERY_MODE_PID;
 		}
+		if(usb_device_present(APPLE_VID, NORMAL_MODE_PID)) {
+			return NORMAL_MODE_PID;
+		}
 		usleep(POLL_INTERVAL_MS * 1000);
 		elapsed += POLL_INTERVAL_MS;
 	}
 	return 0;
+}
+
+/* Guide the user from normal/trusted mode into Recovery mode using only
+ * the physical button sequence (no external tools, no usbmux/lockdownd).
+ * Polls for the Recovery-mode PID (0x1281) to appear. */
+static bool
+enter_recovery_manual(unsigned timeout_ms) {
+	puts("");
+	puts("Bring the device into Recovery mode with this button sequence:");
+	puts("  1. Press and quickly release Volume Up.");
+	puts("  2. Press and quickly release Volume Down.");
+	puts("  3. Press and HOLD the Side (power) button until the screen");
+	puts("     goes completely black (ignore the 'slide to power off').");
+	puts("  4. KEEP holding Side; the screen will briefly stay black, then");
+	puts("     continue holding until the 'connect to a computer' screen");
+	puts("     (cable + iTunes/Computer icon) appears.");
+	puts("");
+	puts("(For devices with a Home button instead: press&hold Side+Home");
+	puts(" together until you see the Recovery screen.)");
+	printf("Waiting for Recovery mode... ");
+	fflush(stdout);
+	if(!poll_present(APPLE_VID, RECOVERY_MODE_PID, true, timeout_ms)) {
+		print_warn("Recovery mode did not appear within timeout.");
+		return false;
+	}
+	print_ok("Recovery mode reached.");
+	return true;
 }
 
 static void
@@ -96,12 +126,18 @@ dfu_guide_run(void) {
 	puts("This will guide you into DFU mode. Have your Lightning/USB cable");
 	puts("ready. Connect the device to this Mac BEFORE starting the steps.");
 
-	/* Step 1: connect device. */
+/* Step 1: connect device. */
 	print_step("Step 1 / 4: Connect your device via USB.");
-	puts("Plug it in now. If it's already plugged in, unplug it first so");
-	puts("the guide can detect a clean insertion.");
-	if(!poll_present(APPLE_VID, RECOVERY_MODE_PID, false, 10000)) {
-		print_warn("Could not confirm the device was unplugged; continuing anyway.");
+	if(usb_device_present(APPLE_VID, DFU_MODE_PID) ||
+	   usb_device_present(APPLE_VID, RECOVERY_MODE_PID) ||
+	   usb_device_present(APPLE_VID, NORMAL_MODE_PID)) {
+		puts("An Apple USB device is already connected; using it.");
+	} else {
+		puts("Plug it in now. If it's already plugged in, unplug it first so");
+		puts("the guide can detect a clean insertion.");
+		if(!poll_present(APPLE_VID, RECOVERY_MODE_PID, false, 10000)) {
+			print_warn("Could not confirm the device was unplugged; continuing anyway.");
+		}
 	}
 	printf("Waiting for the device to enumerate... ");
 	fflush(stdout);
@@ -114,7 +150,16 @@ dfu_guide_run(void) {
 		print_ok("Device is already in DFU mode!");
 		return true;
 	}
-	print_ok("Device detected in Recovery mode.");
+	if(first == NORMAL_MODE_PID) {
+		print_ok("Device detected in NORMAL mode (trusted).");
+		puts("Now put it into Recovery mode with the button sequence below.");
+		if(!enter_recovery_manual(90000)) {
+			return false;
+		}
+		/* fall through to the Recovery -> DFU steps below */
+	} else {
+		print_ok("Device detected in Recovery mode.");
+	}
 
 	/* Step 2: hold power button 8s. */
 	print_step("Step 2 / 4: Press and HOLD the Side/Top (power) button (8 seconds).");

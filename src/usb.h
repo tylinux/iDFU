@@ -28,6 +28,7 @@
 #	define APPLE_VID       (0x5AC)
 #	define DFU_MODE_PID    (0x1227)
 #	define RECOVERY_MODE_PID (0x1281)
+#	define NORMAL_MODE_PID   (0x1298) /* trusted/normal boot (on iOS 9+) */
 
 #	define EP0_MAX_PACKET_SZ      (0x40)
 #	define DFU_MAX_TRANSFER_SZ    (0x800)
