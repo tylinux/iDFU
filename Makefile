@@ -14,7 +14,7 @@
 CC ?= clang
 PROG = idfu
 SRCS = src/idfu.c src/usb.c src/checkm8.c src/img4.c src/lzfse.c src/dfu_guide.c \
-       src/plist.c src/usbmux.c src/lockdown.c
+       src/plist.c src/usbmux.c src/lockdown.c src/usb_watcher.c
 
 PAYLOAD_BINS = \
 	payload/payload_A9.bin \

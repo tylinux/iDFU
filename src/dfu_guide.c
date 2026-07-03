@@ -21,6 +21,7 @@
 #include "usb.h"
 #include "lockdown.h"
 #include "usbmux.h"
+#include "usb_watcher.h"
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -196,6 +197,21 @@ dfu_guide_run(void) {
 		print_ok("Device detected in Recovery mode.");
 	}
 
+	/* The button sequence forces the device to reboot through its BootROM.
+	 * If no client keeps the macOS USB host port alive while the device
+	 * disappears from recovery, the controller suspends the port and the
+	 * BootROM skips DFU (rebounds to recovery). Register long-lived IOKit
+	 * hot-plug subscriptions for the DFU/recovery PIDs so the port stays
+	 * powered across the reboot. */
+	if(!usb_watcher_start()) {
+		print_warn("usb_watcher could not be started; the host USB port may go");
+		puts("    to sleep during the reboot and the device may bounce to recovery");
+		puts("    instead of entering DFU. Continuing anyway.");
+	} else {
+		puts("(USB host port is now held active for the reboot cycle.)");
+	}
+
+	bool result;
 	/* Step 2: hold power button 8s. */
 	print_step("Step 2 / 4: Press and HOLD the Side/Top (power) button (8 seconds).");
 	puts("Keep holding it. The guide will continue automatically when the");
@@ -210,7 +226,8 @@ dfu_guide_run(void) {
 	if(!poll_present(APPLE_VID, RECOVERY_MODE_PID, false, RECOVERY_TIMEOUT_MS)) {
 		print_warn("Recovery mode did not disappear. The button timing may be wrong.");
 		print_button_instructions();
-		return false;
+		result = false;
+		goto done;
 	}
 	print_ok("Recovery mode disappeared (good).");
 
@@ -222,8 +239,13 @@ dfu_guide_run(void) {
 	if(!poll_present(APPLE_VID, DFU_MODE_PID, true, DFU_TIMEOUT_MS)) {
 		print_warn("DFU mode did not appear within 60s. The button timing may be wrong.");
 		print_button_instructions();
-		return false;
+		result = false;
+		goto done;
 	}
 	print_ok("DFU mode detected!");
-	return true;
+	result = true;
+
+done:
+	usb_watcher_stop();
+	return result;
 }
