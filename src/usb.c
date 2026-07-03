@@ -437,3 +437,27 @@ usb_device_present(uint16_t vid, uint16_t pid) {
 	return cf_matching_present(vid, pid, device_class);
 }
 #endif
+
+/* USB Device Firmware Upgrade class request: DFU_DETACH.
+ *   bmRequestType = 0x21  (host-to-device, class, interface)
+ *   bRequest       = 0x00  (DFU_DETACH)
+ *   wValue         = 1000  (detach timeout in ms, informational)
+ *   wIndex         = 0
+ *   wLength        = 0     (no data phase)
+ * Sending this to a device in Apple iBoot recovery mode asks its USB stack
+ * to detach into DFU; the subsequent host-side re-enumeration then drives
+ * the BootROM, which enters DFU when Volume Down is held. */
+bool
+usb_trigger_recovery_reset(void) {
+	usb_handle_t handle;
+	init_usb_handle(&handle, APPLE_VID, RECOVERY_MODE_PID);
+	if(!wait_usb_handle(&handle, NULL, NULL)) {
+		return false;
+	}
+	bool ok = send_usb_control_request(&handle, 0x21, 0x00, 1000, 0, NULL, 0, NULL);
+	if(ok) {
+		reset_usb_handle(&handle);
+	}
+	close_usb_handle(&handle);
+	return ok;
+}

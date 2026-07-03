@@ -96,4 +96,13 @@ char    *get_usb_serial_number(usb_handle_t *handle);
  * observe device insertion/removal transitions without blocking. */
 bool     usb_device_present(uint16_t vid, uint16_t pid);
 
+/* Trigger a reset of a device currently sitting in Apple recovery mode so
+ * that, with Volume Down held, its BootROM re-enters DFU. Opens the device
+ * (VID 0x5AC, PID 0x1281), sends a standard USB DFU class DFU_DETACH
+ * request (bmRequestType 0x21, bRequest 0x00, wValue=timeout, wLength 0),
+ * then asks the host to re-enumerate the device. On macOS this is the
+ * same code path checkra1n uses to force a recovery-mode device to drop
+ * into DFU without waiting for the 6s PMU long-press timer. */
+bool     usb_trigger_recovery_reset(void);
+
 #endif /* IDFU_USB_H */

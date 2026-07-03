@@ -197,53 +197,54 @@ dfu_guide_run(void) {
 		print_ok("Device detected in Recovery mode.");
 	}
 
-	/* The button sequence forces the device to reboot through its BootROM.
-	 * If no client keeps the macOS USB host port alive while the device
-	 * disappears from recovery, the controller suspends the port and the
-	 * BootROM skips DFU (rebounds to recovery). Register long-lived IOKit
-	 * hot-plug subscriptions for the DFU/recovery PIDs so the port stays
-	 * powered across the reboot. */
-	if(!usb_watcher_start()) {
-		print_warn("usb_watcher could not be started; the host USB port may go");
-		puts("    to sleep during the reboot and the device may bounce to recovery");
-		puts("    instead of entering DFU. Continuing anyway.");
-	} else {
-		puts("(USB host port is now held active for the reboot cycle.)");
-	}
-
-	bool result;
-	/* Step 2: hold power button 8s. */
-	print_step("Step 2 / 4: Press and HOLD the Side/Top (power) button (8 seconds).");
-	puts("Keep holding it. The guide will continue automatically when the");
-	puts("device is ready to advance.");
-
-	/* Step 3: hold Home/Volume Down 10s as well -> Device transitions. */
-	print_step("Step 3 / 4: Continue holding Side/Top + press Volume Down (or Home)");
-	puts("for 10 seconds. The screen should stay black. The guide will detect");
-	puts("when the device leaves Recovery.");
-	printf("Waiting for Recovery mode to disappear... ");
+	/* Recovery -> DFU: use the host to trigger a device-side detach+reset
+	 * into DFU (the iBoot recovery USB stack honours a DFU_DETACH class
+	 * request), so you do NOT need the 6s long-press / manual timing.
+	 * We keep the IOKit hot-plug watcher alive across the reboot so the
+	 * USB host port stays powered, and we then poll for the DFU PID.
+	 * HOLD Volume Down (iPhone X+) / Home (older) the whole time.
+	 *
+	 * If the auto-reseat fails, we fall back to the manual button sequence. */
+	print_step("HOLD Volume Down (or Home) now. The device will reset shortly.");
 	fflush(stdout);
-	if(!poll_present(APPLE_VID, RECOVERY_MODE_PID, false, RECOVERY_TIMEOUT_MS)) {
-		print_warn("Recovery mode did not disappear. The button timing may be wrong.");
-		print_button_instructions();
-		result = false;
-		goto done;
+	if(!usb_trigger_recovery_reset()) {
+		print_warn("Auto reset request failed; falling back to manual button sequence.");
+	} else {
+		print_ok("User-request has been sent.");
+		puts("    Keep holding Volume Down (or Home). The guide waits for DFU...");
 	}
-	print_ok("Recovery mode disappeared (good).");
 
-	/* Step 4: Release power button, keep VolDown for 5s -> DFU appears. */
-	print_step("Step 4 / 4: RELEASE the Side/Top button. KEEP holding Volume Down");
-	puts("(or Home) for another ~5 seconds until DFU is detected.");
+	/* Begin the USB-host-port watcher now so the port stays alive for the
+	 * reboot into BootROM, then poll straight for the DFU PID. */
+	bool result;
+	if(usb_watcher_start()) {
+		puts("(USB host port is now held active for the reboot cycle.)");
+	} else {
+		print_warn("usb_watcher could not be started; the host USB port may go");
+		puts("    to sleep during the reboot. Continuing anyway.");
+	}
+
+	puts("Waiting for the device to re-appear in DFU mode (PID 0x1227)...");
 	printf("Waiting for DFU mode... ");
 	fflush(stdout);
-	if(!poll_present(APPLE_VID, DFU_MODE_PID, true, DFU_TIMEOUT_MS)) {
-		print_warn("DFU mode did not appear within 60s. The button timing may be wrong.");
-		print_button_instructions();
-		result = false;
+
+	/* The device typically re-enumerates in DFU within ~10 s. */
+	if(poll_present(APPLE_VID, DFU_MODE_PID, true, 30000)) {
+		print_ok("DFU mode detected!");
+		result = true;
 		goto done;
 	}
-	print_ok("DFU mode detected!");
-	result = true;
+
+	/* Auto reset did not land in DFU: hand the user the standard button
+	 * sequence to finish it manually. */
+	print_warn("Auto reset did not land in DFU within 30s.");
+	puts("");
+	print_button_instructions();
+	puts("Try the manual button sequence now (these buttons, NOT the Side");
+	puts("button alone): press and HOLD the Side/Top button ~8s, then WITH");
+	puts("Volume Down (or Home) held another ~10s, then release the Side/");
+	puts("Top button but keep holding Volume Down/Home ~5 more seconds.");
+	result = false;
 
 done:
 	usb_watcher_stop();
