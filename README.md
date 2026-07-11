@@ -1,146 +1,147 @@
 # iDFU
 
-A macOS/Linux command-line tool for putting Apple devices into DFU mode and
+A macOS/Linux command-line tool for putting Apple devices into **DFU mode** and
 exploiting the [checkm8](https://github.com/0x7ff/gaster) bootrom vulnerability
 to reach **PWNED DFU**, after which unsigned images (e.g. PongoOS) can be
 uploaded and booted.
 
-The checkm8 exploit core (USB primitives, four exploit stages, ROP/payload
-assembly, chip parameter table, AES/KBag decryption, img4 DER parsing) is
-adapted directly from [gaster](https://github.com/0x7ff/gaster) by 0x7ff, which
-is licensed under the Apache License 2.0. The vendored `payload/*.bin` files and
-`src/lzfse.{c,h}` also originate from gaster. The `dfu_guide` interactive mode
-and the `idfu` subcommand layer are new code.
+## DFU entry (fixed)
+
+`idfu guide` follows the same **non-exploit** orchestration as
+[palera1n](https://github.com/palera1n/palera1n) `dfuhelper`:
+
+| Step | Implementation |
+|------|----------------|
+| Detect mode | `libusbmuxd` (normal) + `libirecovery` (recovery/DFU) |
+| Normal → Recovery | `lockdownd_enter_recovery` via **libimobiledevice** |
+| Recovery prep | `irecv_setenv("auto-boot","true")` + `irecv_saveenv` |
+| Soft reboot (~2s black screen) | `irecv_reboot` (**libirecovery**) |
+| Button timing | Side + Volume Down (A11 / no Home) or Home + Power |
+| Success | DFU PID `0x05AC:0x1227` |
+
+This replaces the previous hand-rolled usbmux/plist/lockdown path and the
+incorrect Recovery `DFU_CLR_STATUS` “auto reset” that did not match palera1n.
+
+**Entering DFU is not a vulnerability exploit.** checkm8 runs only after DFU
+via `idfu pwn` / `idfu boot`.
 
 ## Features
 
 | Command | Description |
 |---------|-------------|
-| `idfu guide` | Interactive text-only walk-through to enter DFU mode (polls USB for Recovery/DFU enumeration). |
-| `idfu pwn` | Run checkm8 to reach PWNED DFU. |
-| `idfu boot <image>` | PWN (if not already), then DFU-upload and boot a raw unsigned image such as `PongoOS.bin`. |
+| `idfu guide` | Normal/Recovery → DFU (limd + timed buttons). |
+| `idfu pwn` | checkm8 → PWNED DFU. |
+| `idfu boot <image>` | pwn if needed, upload + boot raw image (e.g. PongoOS). |
 | `idfu reset` | Clear DFU state and reset the device. |
-| `idfu decrypt <src> <dst>` | Decrypt an img4/im4p using the device GID0 AES key. |
-| `idfu decrypt_kbag <kbag>` | Decrypt a KBAG string using the device GID0 AES key. |
+| `idfu decrypt <src> <dst>` | Decrypt img4/im4p with device GID0 AES key. |
+| `idfu decrypt_kbag <kbag>` | Decrypt a KBAG string. |
 | `idfu version` | Print version. |
 
-Environment variables:
+Environment:
 
 - `USB_TIMEOUT` — USB timeout in ms (default `5`).
 - `USB_ABORT_TIMEOUT_MIN` — minimum USB abort timeout in ms (default `0`).
 
-## Supported chips
+## Dependencies (limd stack)
 
-The parameter table covers CPID `0x8950`, `0x8955`, `0x8947`, `0x8960`,
-`0x7001`, `0x7000`, `0x7002`, `0x8003`, `0x8000`, `0x8001`, `0x8002`,
-`0x8004`, `0x8010`, `0x8011`, `0x8015`, `0x8012` — i.e. A7–A11 (and the
-S-series variants). A12+ devices do **not** have DFU-mode checkm8.
+Built against libraries from **limd-build** (or compatible install under
+`~/.local`):
+
+- libimobiledevice  
+- libusbmuxd  
+- libirecovery  
+- libplist  
+- libimobiledevice-glue  
+
+Your tree: `/Users/tylinux/Developer/Projects/appleTV/limd-build`  
+Typical install prefix: `~/.local` (`PREFIX` from `limd-build-macos.sh`).
+
+### Link mode
+
+| Variable | Meaning |
+|----------|---------|
+| `LIMD_PREFIX` | Header/lib root (default `$(HOME)/.local`) |
+| `LIMD_BUILD` | Optional limd-build source tree for includes |
+| `LIMD_STATIC=1` | **Default**: static-link `libirecovery.a` (recovery/DFU path); dynamic-link other limd dylibs from `LIMD_PREFIX` |
+| `LIMD_STATIC=0` | Fully dynamic limd |
+
+Full static `libimobiledevice` needs the **same SSL** the limd tree was built
+with (often in-tree LibreSSL). Hybrid static irecovery is the practical default.
 
 ## Build
 
-### macOS (IOKit)
+### macOS
 
 ```sh
+# ensure limd is installed, e.g. limd-build-macos.sh → ~/.local
 make macos
+# or:
+make macos LIMD_PREFIX=$HOME/.local LIMD_STATIC=1
 ```
 
-Requires Xcode Command Line Tools. On macOS you must run with `root`
-(or grant the entitlements in `ent.plist`):
+Run (USB often needs root / entitlements):
 
 ```sh
-sudo ./idfu pwn
-```
-
-To sign with the bundled entitlements:
-
-```sh
+sudo ./idfu guide
 codesign -s - --entitlements ent.plist --force idfu
 ```
 
-### Linux / other (libusb)
+### Linux
 
 ```sh
 make libusb
+# needs libusb, openssl, and limd libs + usbmuxd
+sudo ./idfu guide
 ```
 
-Requires `libusb-1.0` and `openssl`:
+## Example
 
 ```sh
-# Debian/Ubuntu
-sudo apt install libusb-1.0-0-dev libssl-dev
-# The resulting binary needs root for raw USB access, or a udev rule:
-sudo ./idfu pwn
-```
-
-The `guide` flow's automatic normal-mode → Recovery jump talks to the
-local `usbmuxd` daemon over `/var/run/usbmuxd`. On **macOS this ships with
-the system**; on **Linux you must install and run it yourself**:
-
-```sh
-sudo apt install usbmuxd     # also runs the daemon
-# or start manually:
-sudo usbmuxd -f
-```
-
-If no usbmuxd is running, `idfu guide` falls back to a manual button sequence.
-```
-
-## Example: boot PongoOS
-
-```sh
-# 1. Walk into DFU mode interactively.
+# 1. Normal or Recovery → DFU
 sudo ./idfu guide
 
-# 2. Exploit checkm8 (or let `boot` do it automatically).
+# 2. checkm8
 sudo ./idfu pwn
 
-# 3. Upload and boot PongoOS.
+# 3. Boot PongoOS
 sudo ./idfu boot PongoOS.bin
 ```
+
+iPhone 8 / A11 (`CPID:8015`) button sequence after soft reboot:
+
+1. Hold **Volume Down + Side** (~2s before and after reboot).  
+2. Keep **Volume Down** through the black screen (~10s).  
+3. Tool stops when DFU enumerates.
 
 ## Project layout
 
 ```
 iDFU/
 ├── Makefile
-├── ent.plist            # macOS entitlements
-├── LICENSE              # Apache-2.0
+├── ent.plist
+├── LICENSE                 # Apache-2.0
 ├── README.md
-├── payload/             # vendored gaster payload binaries
-│   ├── payload_A9.bin
-│   ├── payload_notA9.bin
-│   ├── payload_notA9_armv7.bin
-│   ├── payload_handle_checkm8_request.bin
-│   └── payload_handle_checkm8_request_armv7.bin
+├── payload/                # gaster payload binaries
 └── src/
-    ├── idfu.c           # main + subcommand dispatch
-    ├── dfu_guide.{c,h}  # interactive DFU entry guide (new)
-    ├── usb.{c,h}        # USB backend: IOKit (macOS) / libusb (Linux), from gaster
-    ├── device_descriptor.h
-    ├── checkm8.{c,h}    # checkm8 stages + parameter table, from gaster
-    ├── img4.{c,h}       # img4/im4p DER parsing + GID0 AES decrypt, from gaster
-    ├── lzfse.{c,h}      # vendored from gaster (LZSS decompression)
-    └── payload_*.h      # generated at build time (xxd -iC), not committed
+    ├── idfu.c              # CLI
+    ├── dfu_enter.{c,h}     # limd: probe / EnterRecovery / autoboot / reboot
+    ├── dfu_guide.{c,h}     # interactive guide (palera1n-style timing)
+    ├── usb.{c,h}           # IOKit / libusb (gaster)
+    ├── checkm8.{c,h}       # checkm8 (gaster)
+    ├── img4.{c,h}          # img4 decrypt (gaster)
+    ├── lzfse.{c,h}
+    ├── usb_watcher.{c,h}
+    └── plist/usbmux/lockdown  # legacy hand-rolled (unused by guide)
 ```
 
-## Scope and limitations
+## Scope
 
-- iDFU provides a **DFU entry guide**, **checkm8 exploit**, and **unsigned
-  image upload/boot**. It does **not** include KPF, kernel patching, or a
-  full jailbreak — it is a "PWNED DFU prelude" tool.
-- PongoOS / any boot image must be supplied by the user via `idfu boot`.
-- Actual exploitation requires a device in DFU mode; without a device only
-  the `guide`/usage paths can be exercised.
-- Run as `root`. The bundled entitlements grant the USB/IOKit access
-  needed on macOS.
+- DFU entry + checkm8 + unsigned image upload.  
+- No KPF / full jailbreak (use palera1n for that).  
+- Supported checkm8 CPIDs: A7–A11 class (see gaster table). A12+ has no DFU checkm8.
 
 ## Credits
 
-- [gaster](https://github.com/0x7ff/gaster) by 0x7ff — the checkm8 PoC and
-  payload binaries this tool adapts. Licensed Apache-2.0.
-- [checkra1n](https://checkra.in) — its DFU flow design informed the
-  interactive guide and overall workflow.
-
-## License
-
-Apache License 2.0. See [LICENSE](LICENSE).
+- [gaster](https://github.com/0x7ff/gaster) / 0x7ff — checkm8 core (Apache-2.0)  
+- [palera1n](https://github.com/palera1n/palera1n) — DFU helper flow reference  
+- [libimobiledevice](https://libimobiledevice.org) / libirecovery — device protocols  

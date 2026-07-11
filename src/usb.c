@@ -449,12 +449,16 @@ usb_device_present(uint16_t vid, uint16_t pid) {
  * the BootROM, which enters DFU when Volume Down is held. */
 bool
 usb_trigger_recovery_reset(void) {
+	/* Grab the recovery device via the same path gaster uses, then send a
+	 * DFU class request (use DFU_CLR_STATUS, the same one gaster issues
+	 * during its reset flow, to avoid poking vendor-specific behaviour),
+	 * followed by a host re-enumeration. */
 	usb_handle_t handle;
 	init_usb_handle(&handle, APPLE_VID, RECOVERY_MODE_PID);
 	if(!wait_usb_handle(&handle, NULL, NULL)) {
 		return false;
 	}
-	bool ok = send_usb_control_request(&handle, 0x21, 0x00, 1000, 0, NULL, 0, NULL);
+	bool ok = send_usb_control_request_no_data(&handle, 0x21, 0x04 /*DFU_CLR_STATUS*/, 0, 0, 0, NULL);
 	if(ok) {
 		reset_usb_handle(&handle);
 	}
