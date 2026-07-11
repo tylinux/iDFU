@@ -6,8 +6,7 @@
  *
  * http://www.apache.org/licenses/LICENSE-2.0
  *
- * DFU entry helpers built on libimobiledevice / libirecovery / libusbmuxd,
- * following the same recovery->DFU orchestration as palera1n's dfuhelper.
+ * DFU entry / exit helpers on libimobiledevice + libirecovery (palera1n-style).
  */
 #ifndef IDFU_DFU_ENTER_H
 #define IDFU_DFU_ENTER_H
@@ -50,6 +49,12 @@ bool idfu_enter_recovery(const char *udid, char *err, size_t err_sz);
  */
 bool idfu_recovery_autoboot(uint64_t ecid, char *err, size_t err_sz);
 bool idfu_recovery_exitrecv(uint64_t ecid, char *err, size_t err_sz);
+
+/*
+ * Exit Recovery (or iBoot-like) to normal mode: auto-boot=true + reboot.
+ * Pure BootROM DFU cannot soft-boot iOS; returns guidance after USB reset.
+ */
+bool idfu_exit_to_normal(char *err, size_t err_sz);
 
 /* Poll until DFU (0x1227) appears, or timeout_ms elapses. */
 bool idfu_wait_dfu(unsigned timeout_ms);

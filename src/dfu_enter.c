@@ -2,11 +2,12 @@
  *
  * Licensed under the Apache License, Version 2.0.
  *
- * Device mode probe + normal/recovery -> DFU orchestration using official
- * limd stack (libimobiledevice, libusbmuxd, libirecovery, libplist).
- * Logic mirrors palera1n src/dfuhelper.c + src/devhelper.c.
+ * Device mode probe + normal/recovery/DFU helpers using the limd stack
+ * (libimobiledevice, libusbmuxd, libirecovery). Logic mirrors palera1n
+ * dfuhelper/devhelper and irecovery -n for exit-to-normal.
  */
 #include "dfu_enter.h"
+#include "usb_probe.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -16,8 +17,6 @@
 #include <libimobiledevice/lockdown.h>
 #include <libirecovery.h>
 #include <usbmuxd.h>
-
-#include "usb.h"
 
 static void
 set_err(char *err, size_t err_sz, const char *msg) {
@@ -48,6 +47,17 @@ fill_from_irecv(idfu_device_t *out, irecv_client_t client, idfu_mode_t mode) {
 	return true;
 }
 
+static irecv_error_t
+recovery_set_autoboot_and_reboot(irecv_client_t client) {
+	irecv_error_t e = irecv_setenv(client, "auto-boot", "true");
+	if(e != IRECV_E_SUCCESS)
+		return e;
+	e = irecv_saveenv(client);
+	if(e != IRECV_E_SUCCESS)
+		return e;
+	return irecv_reboot(client);
+}
+
 bool
 idfu_dfu_present(void) {
 	return usb_device_present(APPLE_VID, DFU_MODE_PID);
@@ -60,7 +70,6 @@ idfu_wait_dfu(unsigned timeout_ms) {
 	while(elapsed < timeout_ms) {
 		if(idfu_dfu_present())
 			return true;
-		/* Also accept libirecovery DFU open (covers edge re-enum cases). */
 		irecv_client_t client = NULL;
 		if(irecv_open_with_ecid(&client, 0) == IRECV_E_SUCCESS) {
 			int mode = 0;
@@ -85,7 +94,6 @@ idfu_probe_device(idfu_device_t *out, char *err, size_t err_sz) {
 	}
 	memset(out, 0, sizeof(*out));
 
-	/* Prefer DFU / Recovery via libirecovery. */
 	irecv_client_t client = NULL;
 	if(irecv_open_with_ecid(&client, 0) == IRECV_E_SUCCESS) {
 		int mode = 0;
@@ -105,7 +113,6 @@ idfu_probe_device(idfu_device_t *out, char *err, size_t err_sz) {
 		irecv_close(client);
 	}
 
-	/* Fallback PID probe (same numbers as gaster/checkra1n). */
 	if(usb_device_present(APPLE_VID, DFU_MODE_PID)) {
 		out->mode = IDFU_MODE_DFU;
 		return true;
@@ -115,7 +122,6 @@ idfu_probe_device(idfu_device_t *out, char *err, size_t err_sz) {
 		return true;
 	}
 
-	/* Normal mode via usbmuxd. */
 	usbmuxd_device_info_t *devs = NULL;
 	int n = usbmuxd_get_device_list(&devs);
 	if(n > 0 && devs) {
@@ -208,19 +214,67 @@ idfu_recovery_exitrecv(uint64_t ecid, char *err, size_t err_sz) {
 		set_err(err, err_sz, irecv_strerror(e));
 		return false;
 	}
-	e = irecv_setenv(client, "auto-boot", "true");
-	if(e != IRECV_E_SUCCESS)
-		goto fail;
-	e = irecv_saveenv(client);
-	if(e != IRECV_E_SUCCESS)
-		goto fail;
-	e = irecv_reboot(client);
-	if(e != IRECV_E_SUCCESS)
-		goto fail;
+	e = recovery_set_autoboot_and_reboot(client);
+	if(e != IRECV_E_SUCCESS) {
+		set_err(err, err_sz, irecv_strerror(e));
+		irecv_close(client);
+		return false;
+	}
 	irecv_close(client);
 	return true;
-fail:
-	set_err(err, err_sz, irecv_strerror(e));
-	irecv_close(client);
+}
+
+bool
+idfu_exit_to_normal(char *err, size_t err_sz) {
+	idfu_device_t dev;
+	char local_err[256];
+
+	if(!idfu_probe_device(&dev, local_err, sizeof local_err)) {
+		set_err(err, err_sz, local_err);
+		return false;
+	}
+
+	if(dev.mode == IDFU_MODE_NORMAL) {
+		set_err(err, err_sz, "device is already in normal mode");
+		return false;
+	}
+
+	/*
+	 * Recovery (and iBoot-style modes): same as `irecovery -n` —
+	 * setenv auto-boot true + saveenv + reboot.
+	 *
+	 * Pure BootROM DFU (0x1227) has no NVRAM env; software cannot boot
+	 * iOS from there without loading an image. We USB-reset and tell the
+	 * caller to force-restart. If the guide already set auto-boot=true,
+	 * a force restart lands in normal mode instead of Recovery.
+	 */
+	if(dev.mode == IDFU_MODE_RECOVERY) {
+		uint64_t ecid = dev.has_ecid ? dev.ecid : 0;
+		if(!idfu_recovery_exitrecv(ecid, err, err_sz))
+			return false;
+		return true;
+	}
+
+	if(dev.mode == IDFU_MODE_DFU) {
+		irecv_client_t client = NULL;
+		irecv_error_t open_e = irecv_open_with_ecid(&client, dev.has_ecid ? dev.ecid : 0);
+		if(open_e == IRECV_E_SUCCESS) {
+			irecv_error_t e = recovery_set_autoboot_and_reboot(client);
+			if(e == IRECV_E_SUCCESS) {
+				irecv_close(client);
+				return true;
+			}
+			/* Fall back to USB reset so the port re-enumerates cleanly. */
+			irecv_reset(client);
+			irecv_close(client);
+		}
+		set_err(err, err_sz,
+		        "BootROM DFU has no NVRAM; force-restart the device "
+		        "(Side+Vol Down ~10s, then Side) to boot normal if auto-boot is true");
+		/* Still report success with guidance after a best-effort reset. */
+		return open_e == IRECV_E_SUCCESS;
+	}
+
+	set_err(err, err_sz, "unsupported mode for exit-to-normal");
 	return false;
 }

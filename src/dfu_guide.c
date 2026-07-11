@@ -1,20 +1,12 @@
 /* Copyright 2026 iDFU authors
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0.
  *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Interactive DFU entry guide.
- *
- * Flow (aligned with palera1n dfuhelper):
- *   normal  -> lockdownd EnterRecovery (libimobiledevice)
- *   recovery -> setenv auto-boot true + saveenv + irecv_reboot (libirecovery)
+ * Interactive DFU entry guide (palera1n dfuhelper-style):
+ *   normal  -> lockdownd EnterRecovery
+ *   recovery -> setenv auto-boot true + saveenv + irecv_reboot
  *            + timed Side/Volume-Down (or Home) button sequence
  *   wait for DFU PID 0x1227
- *
- * The ~2s black screen after reboot is from irecv_reboot(), not a hard reset.
  */
 #include "dfu_guide.h"
 #include "dfu_enter.h"
@@ -41,8 +33,6 @@ print_warn(const char *msg) {
 	fflush(stdout);
 }
 
-/* Countdown helper: print `text (remaining)` each second.
- * If expect_dfu is true, stop early when DFU appears. */
 static bool
 step_countdown(int seconds, const char *text, bool expect_dfu) {
 	for(int left = seconds; left > 0; left--) {
@@ -63,9 +53,8 @@ step_countdown(int seconds, const char *text, bool expect_dfu) {
 static bool
 wait_recovery_device(idfu_device_t *dev, unsigned timeout_s, char *err, size_t err_sz) {
 	for(unsigned i = 0; i < timeout_s * 5; i++) {
-		if(idfu_probe_device(dev, err, err_sz) && dev->mode == IDFU_MODE_RECOVERY)
-			return true;
-		if(idfu_probe_device(dev, err, err_sz) && dev->mode == IDFU_MODE_DFU)
+		if(idfu_probe_device(dev, err, err_sz) &&
+		   (dev->mode == IDFU_MODE_RECOVERY || dev->mode == IDFU_MODE_DFU))
 			return true;
 		usleep(200 * 1000);
 	}
@@ -87,7 +76,6 @@ recovery_to_dfu(idfu_device_t *dev) {
 		return false;
 	}
 
-	/* Ensure we have ECID for irecv_open_with_ecid. */
 	if(!dev->has_ecid) {
 		idfu_device_t again;
 		if(idfu_probe_device(&again, err, sizeof err) && again.has_ecid)
@@ -106,7 +94,6 @@ recovery_to_dfu(idfu_device_t *dev) {
 	print_step("Setting auto-boot=true (libirecovery)");
 	if(!idfu_recovery_autoboot(dev->ecid, err, sizeof err)) {
 		print_warn(err);
-		/* continue anyway; exitrecv will set it again */
 	} else {
 		print_ok("auto-boot saved.");
 	}
@@ -129,7 +116,6 @@ recovery_to_dfu(idfu_device_t *dev) {
 	                      ? "Hold Volume Down button"
 	                      : "Hold Home button";
 
-	/* palera1n: step(4,2,...) then exitrecv then step(2,0)+step(10,0) */
 	print_step(both);
 	step_countdown(2, both, false);
 
@@ -141,7 +127,6 @@ recovery_to_dfu(idfu_device_t *dev) {
 		print_ok("irecv_reboot issued.");
 	}
 
-	/* Cover SecureROM window: keep both buttons, then only volume/home. */
 	if(step_countdown(2, both, true)) {
 		print_ok("DFU mode detected!");
 		return true;
@@ -151,7 +136,6 @@ recovery_to_dfu(idfu_device_t *dev) {
 		return true;
 	}
 
-	/* Grace poll */
 	print_step("Waiting for DFU re-enumeration...");
 	if(idfu_wait_dfu(15000)) {
 		print_ok("DFU mode detected!");
@@ -173,7 +157,7 @@ dfu_guide_run(void) {
 
 	puts("iDFU interactive DFU guide (limd / palera1n-style)");
 	puts("-------------------------------------------------");
-	puts("Uses libimobiledevice + libirecovery (static when available).");
+	puts("Uses libimobiledevice + libirecovery.");
 	puts("Connect the device over USB. Unlock + Trust this computer if asked.");
 	puts("");
 
@@ -230,4 +214,63 @@ dfu_guide_run(void) {
 	}
 
 	return recovery_to_dfu(&dev);
+}
+
+bool
+dfu_exit_normal_run(void) {
+	char err[256];
+	idfu_device_t dev;
+
+	puts("iDFU exit to normal mode");
+	puts("------------------------");
+
+	if(!idfu_probe_device(&dev, err, sizeof err)) {
+		print_warn(err);
+		return false;
+	}
+
+	switch(dev.mode) {
+	case IDFU_MODE_NORMAL:
+		print_ok("Device is already in normal mode.");
+		if(dev.udid[0])
+			printf("  UDID=%s\n", dev.udid);
+		return true;
+	case IDFU_MODE_RECOVERY:
+		print_ok("Device in Recovery.");
+		if(dev.has_ecid)
+			printf("  ECID=0x%llx\n", (unsigned long long)dev.ecid);
+		print_step("setenv auto-boot true + saveenv + irecv_reboot (irecovery -n)");
+		if(!idfu_exit_to_normal(err, sizeof err)) {
+			print_warn(err);
+			return false;
+		}
+		print_ok("Reboot to normal issued.");
+		return true;
+	case IDFU_MODE_DFU:
+		print_ok("Device in DFU.");
+		if(dev.has_ecid)
+			printf("  ECID=0x%llx  CPID=0x%x\n",
+			       (unsigned long long)dev.ecid, dev.cpid);
+		print_step("Attempting exit from DFU");
+		if(idfu_exit_to_normal(err, sizeof err)) {
+			/* Soft path worked, or reset + guidance. */
+			if(strstr(err, "BootROM DFU") != NULL) {
+				print_warn(err);
+				puts("");
+				puts("Manual force-restart (A11 example):");
+				puts("  1. Hold Side + Volume Down ~10s until Apple logo would appear,");
+				puts("     then release both and briefly press Side to power on.");
+				puts("  2. If auto-boot was set true before DFU entry, iOS should boot.");
+				puts("  3. If you land in Recovery instead, run: idfu exit");
+				return true;
+			}
+			print_ok("Exit command issued.");
+			return true;
+		}
+		print_warn(err);
+		return false;
+	default:
+		print_warn("Unknown mode.");
+		return false;
+	}
 }

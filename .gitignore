@@ -3,12 +3,9 @@ idfu
 idfu.macos
 idfu.libusb
 
-# Generated C headers (created at build time from payload/*.bin via xxd -iC)
-src/payload_A9.h
-src/payload_notA9.h
-src/payload_notA9_armv7.h
-src/payload_handle_checkm8_request.h
-src/payload_handle_checkm8_request_armv7.h
-
 # Object files
 *.o
+
+# Editor / OS
+.DS_Store
+*~

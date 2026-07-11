@@ -1,147 +1,107 @@
 # iDFU
 
-A macOS/Linux command-line tool for putting Apple devices into **DFU mode** and
-exploiting the [checkm8](https://github.com/0x7ff/gaster) bootrom vulnerability
-to reach **PWNED DFU**, after which unsigned images (e.g. PongoOS) can be
-uploaded and booted.
+macOS/Linux CLI to walk an Apple device into **DFU** and to leave **Recovery/DFU**
+toward **normal mode**. No checkm8, no image upload — mode transitions only.
 
-## DFU entry (fixed)
+DFU entry matches [palera1n](https://github.com/palera1n/palera1n) `dfuhelper`
+timing: lockdownd `EnterRecovery`, then libirecovery
+`auto-boot=true` + `saveenv` + `irecv_reboot` (soft reboot, ~2s black screen)
+with a guided button hold.
 
-`idfu guide` follows the same **non-exploit** orchestration as
-[palera1n](https://github.com/palera1n/palera1n) `dfuhelper`:
-
-| Step | Implementation |
-|------|----------------|
-| Detect mode | `libusbmuxd` (normal) + `libirecovery` (recovery/DFU) |
-| Normal → Recovery | `lockdownd_enter_recovery` via **libimobiledevice** |
-| Recovery prep | `irecv_setenv("auto-boot","true")` + `irecv_saveenv` |
-| Soft reboot (~2s black screen) | `irecv_reboot` (**libirecovery**) |
-| Button timing | Side + Volume Down (A11 / no Home) or Home + Power |
-| Success | DFU PID `0x05AC:0x1227` |
-
-This replaces the previous hand-rolled usbmux/plist/lockdown path and the
-incorrect Recovery `DFU_CLR_STATUS` “auto reset” that did not match palera1n.
-
-**Entering DFU is not a vulnerability exploit.** checkm8 runs only after DFU
-via `idfu pwn` / `idfu boot`.
-
-## Features
+## Commands
 
 | Command | Description |
 |---------|-------------|
-| `idfu guide` | Normal/Recovery → DFU (limd + timed buttons). |
-| `idfu pwn` | checkm8 → PWNED DFU. |
-| `idfu boot <image>` | pwn if needed, upload + boot raw image (e.g. PongoOS). |
-| `idfu reset` | Clear DFU state and reset the device. |
-| `idfu decrypt <src> <dst>` | Decrypt img4/im4p with device GID0 AES key. |
-| `idfu decrypt_kbag <kbag>` | Decrypt a KBAG string. |
-| `idfu version` | Print version. |
+| `idfu guide` | Interactive normal/Recovery → DFU walk-through |
+| `idfu exit` | Recovery → normal (`irecovery -n` semantics). From pure BootROM DFU, USB-reset + force-restart instructions |
+| `idfu version` | Print version |
 
-Environment:
-
-- `USB_TIMEOUT` — USB timeout in ms (default `5`).
-- `USB_ABORT_TIMEOUT_MIN` — minimum USB abort timeout in ms (default `0`).
-
-## Dependencies (limd stack)
-
-Built against libraries from **limd-build** (or compatible install under
-`~/.local`):
-
-- libimobiledevice  
-- libusbmuxd  
-- libirecovery  
-- libplist  
-- libimobiledevice-glue  
-
-Your tree: `/Users/tylinux/Developer/Projects/appleTV/limd-build`  
-Typical install prefix: `~/.local` (`PREFIX` from `limd-build-macos.sh`).
-
-### Link mode
-
-| Variable | Meaning |
-|----------|---------|
-| `LIMD_PREFIX` | Header/lib root (default `$(HOME)/.local`) |
-| `LIMD_BUILD` | Optional limd-build source tree for includes |
-| `LIMD_STATIC=1` | **Default**: static-link `libirecovery.a` (recovery/DFU path); dynamic-link other limd dylibs from `LIMD_PREFIX` |
-| `LIMD_STATIC=0` | Fully dynamic limd |
-
-Full static `libimobiledevice` needs the **same SSL** the limd tree was built
-with (often in-tree LibreSSL). Hybrid static irecovery is the practical default.
+`idfu normal` is an alias for `idfu exit`.
 
 ## Build
 
-### macOS
+### Dependencies
+
+Built against a [libimobiledevice](https://libimobiledevice.org) stack
+(libimobiledevice, libusbmuxd, libirecovery, libplist, libimobiledevice-glue).
+
+Default prefix: `~/.local` (e.g. from limd-build). Override with `LIMD_PREFIX`.
 
 ```sh
-# ensure limd is installed, e.g. limd-build-macos.sh → ~/.local
+# macOS
 make macos
-# or:
-make macos LIMD_PREFIX=$HOME/.local LIMD_STATIC=1
-```
+# or: make
 
-Run (USB often needs root / entitlements):
-
-```sh
-sudo ./idfu guide
-codesign -s - --entitlements ent.plist --force idfu
-```
-
-### Linux
-
-```sh
+# Linux (libusb for PID probe)
 make libusb
-# needs libusb, openssl, and limd libs + usbmuxd
-sudo ./idfu guide
 ```
 
-## Example
+Link modes:
+
+- `LIMD_STATIC=1` (default): force-load `libirecovery.a`, dynamic-link the rest
+  of the limd stack from `LIMD_PREFIX/lib` (avoids LibreSSL/OpenSSL ABI issues
+  when fully static-linking libimobiledevice).
+- `LIMD_STATIC=0`: fully dynamic.
 
 ```sh
-# 1. Normal or Recovery → DFU
-sudo ./idfu guide
-
-# 2. checkm8
-sudo ./idfu pwn
-
-# 3. Boot PongoOS
-sudo ./idfu boot PongoOS.bin
+make LIMD_PREFIX=$HOME/.local LIMD_STATIC=1
 ```
 
-iPhone 8 / A11 (`CPID:8015`) button sequence after soft reboot:
+On Linux, install and run `usbmuxd` for normal-mode devices:
 
-1. Hold **Volume Down + Side** (~2s before and after reboot).  
-2. Keep **Volume Down** through the black screen (~10s).  
-3. Tool stops when DFU enumerates.
+```sh
+sudo apt install usbmuxd libusb-1.0-0-dev
+sudo usbmuxd -f   # if not already running
+```
 
-## Project layout
+## Usage
+
+```sh
+# Walk into DFU (unlock + Trust if starting from normal mode)
+./idfu guide
+
+# Leave Recovery (or attempt exit from DFU) toward iOS
+./idfu exit
+```
+
+### Recovery → DFU button timing (A11 / no Home)
+
+1. Ready fingers on **Volume Down + Side**.
+2. Soft reboot is issued (`irecv_reboot`); screen goes black in ~2s.
+3. Hold both ~2s through reboot, then hold **Volume Down** alone ~10s.
+4. Tool reports DFU when PID `0x1227` appears.
+
+Devices with a Home button use **Home + Power**, then **Home** alone.
+
+### Exit to normal
+
+- **Recovery**: `setenv auto-boot true` → `saveenv` → `irecv_reboot` (same as
+  `irecovery -n`).
+- **BootROM DFU**: no NVRAM; the tool may USB-reset and print a force-restart
+  sequence. If `auto-boot` was set true during `guide`, a force restart should
+  boot iOS instead of Recovery. If you land in Recovery, run `idfu exit` again.
+
+## Layout
 
 ```
 iDFU/
 ├── Makefile
-├── ent.plist
-├── LICENSE                 # Apache-2.0
+├── LICENSE              # Apache-2.0
 ├── README.md
-├── payload/                # gaster payload binaries
+├── ent.plist            # legacy macOS USB entitlements (optional)
 └── src/
-    ├── idfu.c              # CLI
-    ├── dfu_enter.{c,h}     # limd: probe / EnterRecovery / autoboot / reboot
-    ├── dfu_guide.{c,h}     # interactive guide (palera1n-style timing)
-    ├── usb.{c,h}           # IOKit / libusb (gaster)
-    ├── checkm8.{c,h}       # checkm8 (gaster)
-    ├── img4.{c,h}          # img4 decrypt (gaster)
-    ├── lzfse.{c,h}
-    ├── usb_watcher.{c,h}
-    └── plist/usbmux/lockdown  # legacy hand-rolled (unused by guide)
+    ├── idfu.c           # CLI dispatch
+    ├── dfu_guide.{c,h}  # interactive guide + exit UX
+    ├── dfu_enter.{c,h}  # limd probe / EnterRecovery / irecv helpers
+    └── usb_probe.{c,h}  # VID/PID presence (IOKit or libusb)
 ```
 
 ## Scope
 
-- DFU entry + checkm8 + unsigned image upload.  
-- No KPF / full jailbreak (use palera1n for that).  
-- Supported checkm8 CPIDs: A7–A11 class (see gaster table). A12+ has no DFU checkm8.
+- **In scope**: mode detection, DFU entry guide, exit-to-normal.
+- **Out of scope**: checkm8, PongoOS, kernel patching, jailbreak.
 
 ## Credits
 
-- [gaster](https://github.com/0x7ff/gaster) / 0x7ff — checkm8 core (Apache-2.0)  
-- [palera1n](https://github.com/palera1n/palera1n) — DFU helper flow reference  
-- [libimobiledevice](https://libimobiledevice.org) / libirecovery — device protocols  
+- [palera1n](https://github.com/palera1n/palera1n) — DFU helper flow and timing
+- [libimobiledevice](https://libimobiledevice.org) / libirecovery — device APIs
